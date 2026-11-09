@@ -52,6 +52,37 @@ function setBodyScanning(active: boolean) {
   }
 }
 
+// دالة تنظيف وتحليل النص الممسوح لتصحيح الفراغات وتوحيد المفاتيح
+function parseCardPayload(rawText: string): string {
+  if (!rawText) return rawText;
+  
+  const cleaned = rawText.trim();
+  const parts = cleaned.split('|').map(p => p.trim());
+  
+  const data: Record<string, string> = {};
+  parts.forEach(part => {
+    const colonIndex = part.indexOf(':');
+    if (colonIndex !== -1) {
+      const key = part.substring(0, colonIndex).trim();
+      const value = part.substring(colonIndex + 1).trim();
+      data[key] = value;
+    }
+  });
+
+  // إذا تم العثور على المعرف التسلسلي أو الرقم الوطني، نقوم بإعادة بناء النص بالصيغة القياسية السليمة
+  const nin = data['NIN'] || '';
+  const name = data['اسم'] || '';
+  const decision = data['قرار'] || '';
+  const sn = data['SN'] || data['SN '] || '';
+  const sig = data['sig'] || '';
+
+  if (nin || sn) {
+    return `NIN:${nin}|اسم:${name}|قرار:${decision}|SN:${sn}|sig:${sig}`;
+  }
+
+  return cleaned;
+}
+
 export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDiagnostics }: CardScannerProps) {
   const { t } = useTranslation();
   const isNative = Capacitor.isNativePlatform();
@@ -88,7 +119,8 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
   }, [paused, onDetect]);
 
   const emit = useCallback((text: string) => {
-    const value = text.trim();
+    const parsedValue = parseCardPayload(text);
+    const value = parsedValue.trim();
     if (!value || pausedRef.current) return;
     const now = Date.now();
     const last = lastRef.current;
@@ -141,13 +173,11 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
     onCloseRef.current();
   }, [stopNativeScan]);
 
-  // --- Native scanner (MLKit startScan with transparency) ---
   useEffect(() => {
     if (!isNative) return;
     let cancelled = false;
 
     const startNativeLive = async () => {
-      // Guard against double-start: wait for any previous start to finish
       while (startingRef.current) {
         await new Promise<void>((resolve) => setTimeout(resolve, 50));
         if (cancelled) return;
@@ -165,8 +195,6 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
         });
         nativeListenersRef.current = [scanListener, errorListener];
 
-        // Make the WebView transparent BEFORE startScan so the native camera
-        // preview (rendered behind the WebView) is visible through it.
         setBodyScanning(true);
         scanningRef.current = true;
 
@@ -215,7 +243,6 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
       await startWebFallback();
     });
 
-    // Android hardware back button -> close scanner
     if (Capacitor.isNativePlatform()) {
       const appBridge = Capacitor as unknown as {
         App?: { addListener: (event: string, cb: () => void) => Promise<PluginListenerHandle> };
@@ -242,14 +269,12 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isNative, facing, permissionVersion]);
 
-  // --- Cleanup on unmount: ensure body scanning class is always removed ---
   useEffect(() => {
     return () => {
       setBodyScanning(false);
     };
   }, []);
 
-  // --- Web fallback scanner (@zxing/browser) ---
   const startWebFallback = async () => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       setStatus('unsupported');
@@ -313,7 +338,6 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
     }
   };
 
-  // --- Web scanner for non-native platforms ---
   useEffect(() => {
     if (isNative) return;
     let cancelled = false;
@@ -407,16 +431,6 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
     }
   };
 
-  const retry = async () => {
-    setLastError(null);
-    setStatus('checking');
-    if (isNative) {
-      setPermissionVersion((value) => value + 1);
-    } else {
-      setFacing((value) => value);
-    }
-  };
-
   const toggleTorch = async () => {
     const next = !torchOn;
     if (isNative && !usingFallback && mode === 'nativeLive') {
@@ -444,7 +458,6 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
     }
   };
 
-  // --- System scanner fallback (BarcodeScanner.scan with Google UI) ---
   const runSystemScan = async () => {
     try {
       const googleModule = await BarcodeScanner.isGoogleBarcodeScannerModuleAvailable();
@@ -459,7 +472,8 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
       const result = await BarcodeScanner.scan({ formats: NATIVE_FORMATS });
       const value = result.barcodes[0]?.rawValue;
       if (value) {
-        setSystemScanResult(value);
+        const parsed = parseCardPayload(value);
+        setSystemScanResult(parsed);
         emit(value);
       }
     } catch (err) {
@@ -484,19 +498,15 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
 
   const isNativeLive = isNative && !usingFallback && mode === 'nativeLive';
   const isSystemMode = mode === 'systemScanner';
-  // Native live: transparent so camera shows through. Web/system: dark bg.
   const overlayClass = isNativeLive ? 'bg-transparent' : 'bg-neutral-950';
-
   const showErrorButtons = status === 'denied' || status === 'unsupported' || status === 'pluginMissing' || status === 'noCamera';
 
   const overlay = (
     <div ref={overlayRef} className={`scanner-overlay fixed inset-0 z-50 flex flex-col text-white ${overlayClass}`}>
-      {/* Web fallback video preview — full screen behind the overlay controls */}
       {(!isNative || usingFallback || mode === 'web') && !isSystemMode ? (
         <video ref={videoRef} muted playsInline className="absolute inset-0 h-full w-full object-cover" />
       ) : null}
 
-      {/* Top bar: close + torch + switch camera */}
       <div className="relative z-10 flex items-center justify-between gap-3 p-4">
         <button
           type="button"
@@ -551,9 +561,7 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
         </div>
       </div>
 
-      {/* Center area */}
       <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-6 px-6">
-        {/* Native live: scanning frame with darkened corners */}
         {status === 'running' && !isSystemMode ? (
           <>
             <div className="aspect-[3/2] w-full max-w-sm rounded-3xl border-4 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]" />
@@ -564,10 +572,8 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
           </>
         ) : null}
 
-        {/* Scan result banner — visible while the camera runs */}
         {banner ? <ScanResultBanner banner={banner} /> : null}
 
-        {/* System scanner mode */}
         {isSystemMode ? (
           <div className="flex w-full max-w-sm flex-col gap-4">
             <p className="text-center text-base text-white/90">{t('canteen.scanner.systemScannerHint')}</p>
@@ -606,15 +612,11 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
               <p className="text-sm font-mono text-neutral-500 break-words">{lastError}</p>
             ) : null}
             <div className="flex gap-3">
-              <Button variant="ghost" fullWidth onClick={retry}>
+              <Button variant="ghost" fullWidth onClick={() => { setLastError(null); setStatus('checking'); if (isNative) setPermissionVersion(v => v + 1); }}>
                 <RefreshCw className="size-4" aria-hidden />
                 {t('canteen.scanner.tryAgain')}
               </Button>
-              <Button fullWidth onClick={() => {
-                if (isNative) {
-                  void BarcodeScanner.openSettings().catch(() => undefined);
-                }
-              }}>
+              <Button fullWidth onClick={() => { if (isNative) void BarcodeScanner.openSettings().catch(() => undefined); }}>
                 <SettingsIcon className="size-4" aria-hidden />
                 {t('canteen.scanner.openSettings')}
               </Button>
@@ -629,7 +631,6 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
         ) : null}
       </div>
 
-      {/* Bottom: manual entry button */}
       <div className="relative z-10 p-4">
         <button
           type="button"
@@ -643,9 +644,5 @@ export function CardScanner({ paused, banner, onDetect, onManual, onClose, onDia
     </div>
   );
 
-  // Render via portal at document.body so the overlay is outside the app's
-  // normal content flow — this prevents layout interference and ensures the
-  // CSS transparency rules work correctly regardless of where CardScanner
-  // is mounted in the component tree.
   return createPortal(overlay, document.body);
 }
