@@ -1,3 +1,5 @@
+// src/utils/platform.ts
 import { Capacitor } from '@capacitor/core';
 
-export const isNativeApp = Capacitor.isNativePlatform();
+export const isNative = Capacitor.isNativePlatform();
+export const platform = Capacitor.getPlatform(); // 'ios', 'android', 'web'
