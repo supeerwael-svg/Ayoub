@@ -171,9 +171,33 @@ export function CanteenScreen() {
     }
   };
 
-  const handleScannedText = (text: string) => {
-    const student = findStudentByCode(students, text, matchField);
-    void evaluate(student, text, false);
+  const handleScannedText = (rawText: string) => {
+    let lookupCode = rawText.trim();
+    
+    // استخراج الكود الحقيقي (SN أو NIN) من النص المركب للبطاقة لتجنب خطأ البطاقة غير المعروفة
+    if (lookupCode.includes('|')) {
+      const parts = lookupCode.split('|').map(p => p.trim());
+      const data: Record<string, string> = {};
+      parts.forEach(part => {
+        const colonIndex = part.indexOf(':');
+        if (colonIndex !== -1) {
+          const key = part.substring(0, colonIndex).trim();
+          const value = part.substring(colonIndex + 1).trim();
+          data[key] = value;
+        }
+      });
+
+      if (matchField === 'nin' && data['NIN']) {
+        lookupCode = data['NIN'];
+      } else if (data['SN']) {
+        lookupCode = data['SN'];
+      } else if (data['NIN']) {
+        lookupCode = data['NIN'];
+      }
+    }
+
+    const student = findStudentByCode(students, lookupCode, matchField);
+    void evaluate(student, rawText, false);
   };
 
   const handleManualCode = (code: string) => {
