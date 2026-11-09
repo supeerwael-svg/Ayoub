@@ -172,9 +172,11 @@ export function CanteenScreen() {
   };
 
   const handleScannedText = (rawText: string) => {
-    let lookupCode = rawText.trim();
+    // 1. تنظيف النص وإزالة الأسطر الجديدة والمسافات الزائدة
+    const sanitizedRaw = rawText.replace(/[\r\n]+/g, '').trim();
+    let lookupCode = sanitizedRaw;
     
-    // استخراج الكود الحقيقي (SN أو NIN) من النص المركب للبطاقة لتجنب خطأ البطاقة غير المعروفة
+    // 2. استخراج الـ NIN حصرياً ليكون هو كود البطاقة المعتمد للبحث
     if (lookupCode.includes('|')) {
       const parts = lookupCode.split('|').map(p => p.trim());
       const data: Record<string, string> = {};
@@ -187,11 +189,7 @@ export function CanteenScreen() {
         }
       });
 
-      if (matchField === 'nin' && data['NIN']) {
-        lookupCode = data['NIN'];
-      } else if (data['SN']) {
-        lookupCode = data['SN'];
-      } else if (data['NIN']) {
+      if (data['NIN']) {
         lookupCode = data['NIN'];
       }
     }
