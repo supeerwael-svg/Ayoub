@@ -1,26 +1,136 @@
-name: Android CI
+name: Build Android APK
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-    - uses: actions/checkout@v4
-    - name: set up JDK 11
-      uses: actions/setup-java@v4
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-        cache: gradle
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-    - name: Build with Gradle
-      run: ./gradlew build
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Detect Capacitor major version
+        id: cap
+        run: |
+          MAJOR=$(node -p "require('./node_modules/@capacitor/core/package.json').version.split('.')[0]")
+          echo "Capacitor major: $MAJOR"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java (17 for Capacitor 6, 21 for Capacitor 7+)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ fromJSON(steps.cap.outputs.major) >= 7 && '21' || '17' }}
+          cache: gradle
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Create the android project if it is missing or incomplete
+        run: |
+          RES=android/app/src/main/res
+          if [ ! -d android ]; then
+            echo "android folder not found: generating it"
+            npx cap add android
+          elif [ ! -f "$RES/values/strings.xml" ] || [ ! -f "$RES/values/styles.xml" ] || [ ! -f "$RES/xml/file_paths.xml" ] || [ ! -d "$RES/mipmap-hdpi" ]; then
+            echo "android folder is INCOMPLETE (resources missing): regenerating it"
+            rm -rf android
+            npx cap add android
+          else
+            echo "android folder is complete: keeping it as is"
+          fi
+          echo "--- resources present ---"
+          ls -R android/app/src/main/res | head -n 40
+
+      - name: Patch AndroidManifest (camera + barcode scanner)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text(encoding="utf-8")
+          add = ""
+          if "android.permission.CAMERA" not in s:
+              add += '    <uses-permission android:name="android.permission.CAMERA" />\n'
+          if "android.hardware.camera" not in s:
+              add += '    <uses-feature android:name="android.hardware.camera" android:required="false" />\n'
+          if add:
+              s = s.replace("</manifest>", add + "</manifest>")
+          if "com.google.mlkit.vision.DEPENDENCIES" not in s:
+              meta = '        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui" />\n'
+              s = s.replace("</application>", meta + "    </application>")
+          p.write_text(s, encoding="utf-8")
+          print(s)
+          PY
+
+      - name: Set app version from the run number
+        run: |
+          sed -i -E "s/versionCode [0-9]+/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"1.0.${{ github.run_number }}\"/" android/app/build.gradle
+          grep -nE "versionCode|versionName" android/app/build.gradle
+
+      - name: Use the stable debug keystore (so updates install over the old version)
+        run: |
+          if [ -f school-debug.keystore ]; then
+            mkdir -p ~/.android
+            cp school-debug.keystore ~/.android/debug.keystore
+            echo "Using school-debug.keystore"
+          else
+            echo "::warning::school-debug.keystore not found in the repository root. The APK is signed with a random key and will NOT install over a previous build."
+          fi
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Show permissions, version and signer inside the APK
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          "$BT/aapt" dump badging "$APK" | grep -E "^package:|uses-permission|uses-feature" || true
+          echo "--- signer ---"
+          "$BT/apksigner" verify --print-certs "$APK" | head -n 3 || true
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk school-admin.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: school-admin-apk
+          path: school-admin.apk
+
+      - name: Publish to the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag -y || true
+          gh release create latest school-admin.apk \
+            --title "School Admin (latest)" \
+            --notes "Build #${{ github.run_number }} - version 1.0.${{ github.run_number }}" \
+            --target "${{ github.sha }}"
+
